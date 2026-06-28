@@ -22,7 +22,6 @@ This project uses the current `USTP-Secure` transport base and tunnels DNS packe
 ## Current scope
 
 - Python DoU server/client included
-- native OpenWrt client package source included
 - no TCP tunnel
 - raw DNS packets over USTPS
 - TOFU supported like USTP-Secure
@@ -113,68 +112,6 @@ x1co.com.br:4053
 [2001:db8::1]
 [2001:db8::1]:4053
 ```
-
-## OpenWrt
-
-The `DoU` repo keeps the Python-oriented OpenWrt bootstrap path:
-
-- `openwrt/`
-  - quick Python-based bootstrap for larger devices
-
-The native package source tree was split out into the separate `DoU-OpenWrt` repo/directory so the router-specific packaging can evolve independently.
-
-Files:
-- `openwrt/dou.uci`
-- `openwrt/dou.init`
-- `openwrt/apply_uci.sh`
-
-What it does:
-- installs a UCI config for DoU
-- installs an OpenWrt init/procd service for the DoU client
-- can automatically point `dnsmasq` to the local DoU listener
-
-Important:
-- it still needs the real server values before it can work
-- especially:
-  - `server`
-  - optional `peer_port`
-  - cipher / cleartext / congestion settings if you want different ones
-
-Suggested OpenWrt flow:
-
-```sh
-cd /root/DoU
-sh ./openwrt/apply_uci.sh
-uci set dou.main.server='YOUR_SERVER_IP_OR_DOMAIN'
-uci set dou.main.enabled='1'
-uci commit dou
-/etc/init.d/dou restart
-/etc/init.d/dnsmasq restart
-```
-
-Local DNS target on OpenWrt:
-- default local listener: `::1:4333`
-- the native client now accepts IPv4 or IPv6 listener addresses
-
-The init script runs:
-- `python3 /root/DoU/client.py ...`
-
-If you want another project path on OpenWrt, edit:
-- `openwrt/dou.init`
-
-## Native OpenWrt Package
-
-The native OpenWrt package now lives in the separate `DoU-OpenWrt` directory/repo.
-
-That split keeps:
-- `DoU`
-  - Python server
-  - Python client
-  - Python-based OpenWrt bootstrap
-- `DoU-OpenWrt`
-  - native `.ipk` packaging
-  - native `C` client
-  - small-router footprint tuning
 
 ## Systemd
 
