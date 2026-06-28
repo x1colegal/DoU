@@ -363,6 +363,7 @@ def main() -> None:
     receiver = None
     pending: dict[int, tuple[tuple, float, bytes]] = {}
     pending_lock = threading.RLock()
+    transport_lock = threading.RLock()
     req_counter = 1
     running = True
 
@@ -374,6 +375,27 @@ def main() -> None:
             if req_counter == 0:
                 req_counter = 1
             return rid
+
+    def close_transport() -> None:
+        nonlocal raw_usock, usock, peer, sender, receiver
+        with transport_lock:
+            current_sender = sender
+            current_raw = raw_usock
+            sender = None
+            receiver = None
+            usock = None
+            raw_usock = None
+            peer = None
+        if current_sender is not None:
+            try:
+                current_sender.stop()
+            except Exception:
+                pass
+        if current_raw is not None:
+            try:
+                current_raw.close()
+            except Exception:
+                pass
 
     def connect_transport() -> None:
         nonlocal raw_usock, usock, peer, sender, receiver
@@ -474,17 +496,16 @@ def main() -> None:
                         congestion_control=(negotiated_cc == "on"),
                     )
                     sender_candidate.start()
-                    raw_usock = raw_candidate
-                    usock = usock_candidate
-                    peer = addr
-                    sender = sender_candidate
-                    receiver = USTPReceiver(sock=usock_candidate, peer=addr)
+                    with transport_lock:
+                        raw_usock = raw_candidate
+                        usock = usock_candidate
+                        peer = addr
+                        sender = sender_candidate
+                        receiver = USTPReceiver(sock=usock_candidate, peer=addr)
                     print(f"[DoU-CLIENT] transport ready local={raw_candidate.getsockname()} peer={addr[0]}:{addr[1]}")
                     return
             raw_candidate.close()
         raise SystemExit("DoU server did not complete handshake")
-
-    connect_transport()
 
     local_dns = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     tune_udp_socket(local_dns)
@@ -506,7 +527,11 @@ def main() -> None:
                 pending[request_id] = (src, time.time(), payload)
             print(f"[DoU-CLIENT] local dns query id={request_id} from={src[0]}:{src[1]} bytes={len(payload)}")
             try:
-                sender.queue_payload(encode_frame(TYPE_QUERY, request_id, payload))
+                with transport_lock:
+                    current_sender = sender
+                if current_sender is None:
+                    raise RuntimeError("transport unavailable")
+                current_sender.queue_payload(encode_frame(TYPE_QUERY, request_id, payload))
             except Exception as exc:
                 with pending_lock:
                     pending.pop(request_id, None)
@@ -521,54 +546,72 @@ def main() -> None:
     def transport_listener() -> None:
         while running:
             try:
-                raw, addr = usock.recvfrom(65535)
-            except socket.timeout:
+                connect_transport()
+            except Exception as exc:
+                print(f"[DoU-CLIENT] transport connect failed: {exc}")
+                time.sleep(1.0)
                 continue
-            except OSError:
-                break
-            pkt = parse_packet(raw)
-            if pkt is None:
-                continue
-            if pkt.pkt_type in (TYPE_HELLO, TYPE_ACK, TYPE_RETRANSMIT_REQUEST):
-                if pkt.pkt_type != TYPE_HELLO:
-                    sender.on_control(pkt)
-                continue
-            if pkt.pkt_type == TYPE_CLOSE:
-                print("[DoU-CLIENT] server closed the session")
-                break
-            if pkt.pkt_type != TYPE_DATA:
-                continue
-            payload = receiver.handle_data(pkt)
-            receiver.maybe_nack()
-            if not payload:
-                continue
-            frame = decode_frame(payload)
-            if frame is None:
-                continue
-            request_id = frame["request_id"]
-            if frame["type"] == TYPE_RESPONSE:
-                with pending_lock:
-                    info = pending.pop(request_id, None)
-                if info is not None:
-                    print(f"[DoU-CLIENT] local dns response id={request_id} to={info[0][0]}:{info[0][1]} bytes={len(frame['payload'])}")
-                    local_dns.sendto(frame["payload"], info[0])
-                continue
-            if frame["type"] == TYPE_ERROR:
-                info = decode_json_payload(frame["payload"]) or {}
-                with pending_lock:
-                    pending_info = pending.pop(request_id, None)
-                if pending_info is not None:
-                    servfail = build_dns_servfail(pending_info[2])
-                    if servfail is not None:
-                        try:
-                            local_dns.sendto(servfail, pending_info[0])
-                            print(f"[DoU-CLIENT] local dns upstream error id={request_id} -> SERVFAIL")
-                        except OSError:
-                            pass
-                print(f"[DoU-CLIENT] request {request_id} failed: {info.get('message', 'unknown error')}")
-                continue
-            if frame["type"] == TYPE_PONG:
-                continue
+            while running:
+                with transport_lock:
+                    current_sock = usock
+                    current_sender = sender
+                    current_receiver = receiver
+                if current_sock is None or current_sender is None or current_receiver is None:
+                    break
+                try:
+                    raw, addr = current_sock.recvfrom(65535)
+                except socket.timeout:
+                    continue
+                except OSError as exc:
+                    print(f"[DoU-CLIENT] transport lost: {exc}")
+                    break
+                pkt = parse_packet(raw)
+                if pkt is None:
+                    continue
+                if pkt.pkt_type in (TYPE_HELLO, TYPE_ACK, TYPE_RETRANSMIT_REQUEST):
+                    if pkt.pkt_type != TYPE_HELLO:
+                        current_sender.on_control(pkt)
+                    continue
+                if pkt.pkt_type == TYPE_CLOSE:
+                    print("[DoU-CLIENT] server closed the session")
+                    break
+                if pkt.pkt_type != TYPE_DATA:
+                    continue
+                payload = current_receiver.handle_data(pkt)
+                current_receiver.maybe_nack()
+                if not payload:
+                    continue
+                frame = decode_frame(payload)
+                if frame is None:
+                    continue
+                request_id = frame["request_id"]
+                if frame["type"] == TYPE_RESPONSE:
+                    with pending_lock:
+                        info = pending.pop(request_id, None)
+                    if info is not None:
+                        print(f"[DoU-CLIENT] local dns response id={request_id} to={info[0][0]}:{info[0][1]} bytes={len(frame['payload'])}")
+                        local_dns.sendto(frame["payload"], info[0])
+                    continue
+                if frame["type"] == TYPE_ERROR:
+                    info = decode_json_payload(frame["payload"]) or {}
+                    with pending_lock:
+                        pending_info = pending.pop(request_id, None)
+                    if pending_info is not None:
+                        servfail = build_dns_servfail(pending_info[2])
+                        if servfail is not None:
+                            try:
+                                local_dns.sendto(servfail, pending_info[0])
+                                print(f"[DoU-CLIENT] local dns upstream error id={request_id} -> SERVFAIL")
+                            except OSError:
+                                pass
+                    print(f"[DoU-CLIENT] request {request_id} failed: {info.get('message', 'unknown error')}")
+                    continue
+                if frame["type"] == TYPE_PONG:
+                    continue
+            close_transport()
+            if running:
+                print("[DoU-CLIENT] reconnecting transport...")
+                time.sleep(1.0)
 
     def janitor() -> None:
         while running:
@@ -600,34 +643,31 @@ def main() -> None:
     janitor_thread.start()
 
     try:
-        while transport_thread.is_alive():
+        while local_thread.is_alive() and transport_thread.is_alive():
             time.sleep(0.5)
     except KeyboardInterrupt:
         pass
     finally:
         running = False
         try:
-            sender.queue_payload(encode_frame(TYPE_PING, 0, b"bye"))
+            with transport_lock:
+                current_sender = sender
+                current_sock = usock
+                current_peer = peer
+            if current_sender is not None:
+                current_sender.queue_payload(encode_frame(TYPE_PING, 0, b"bye"))
         except Exception:
             pass
         try:
-            usock.send_plain(mkp(TYPE_CLOSE, payload=b"BYE").to_bytes(), peer)
+            if current_sock is not None and current_peer is not None:
+                current_sock.send_plain(mkp(TYPE_CLOSE, payload=b"BYE").to_bytes(), current_peer)
         except Exception:
             pass
         try:
             local_dns.close()
         except Exception:
             pass
-        try:
-            if sender is not None:
-                sender.stop()
-        except Exception:
-            pass
-        try:
-            if raw_usock is not None:
-                raw_usock.close()
-        except Exception:
-            pass
+        close_transport()
 
 
 if __name__ == "__main__":

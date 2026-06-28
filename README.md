@@ -98,7 +98,7 @@ python3 client.py --start --server <SERVER_IP_OR_DOMAIN>
 Then point your local resolver or app to:
 
 ```text
-127.0.0.1:4333
+::1:4333
 ```
 
 If you start the client manually without `--server`, it will ask you for the DoU server first.
@@ -153,7 +153,7 @@ uci commit dou
 ```
 
 Local DNS target on OpenWrt:
-- default local listener: `127.0.0.1:4333`
+- default local listener: `::1:4333`
 - the native client now accepts IPv4 or IPv6 listener addresses
 
 The init script runs:
@@ -182,7 +182,7 @@ The Python DoU server now installs its `systemd` unit automatically when:
 
 - `systemd` is available
 - the process is running as `root`
-- `/etc/systemd/system/dou-server.service` does not already exist
+- the generated unit needs to be installed or updated
 
 The generated server unit keeps only the necessary flags:
 
@@ -201,7 +201,7 @@ The Python DoU client now also installs its `systemd` unit automatically when:
 
 - `systemd` is available
 - the process is running as `root`
-- `/etc/systemd/system/dou-client.service` does not already exist
+- the generated unit needs to be installed or updated
 
 The client configures `dnsmasq` automatically:
 
@@ -213,6 +213,12 @@ The client configures `dnsmasq` automatically:
 no-resolv
 server=::1#4333
 ```
+
+## Recovery
+
+- if the network drops temporarily, the client now keeps running and keeps trying to rebuild the USTPS transport
+- local DNS requests may still time out or return `SERVFAIL` while the uplink is down
+- once connectivity comes back, the client reconnects without needing a manual restart
 
 For the client, the installed service automatically stores the chosen DoU server in:
 
