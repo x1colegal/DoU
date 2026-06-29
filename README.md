@@ -71,7 +71,8 @@ DNS64 behavior:
 
 - if a domain already has real `AAAA` records, the server returns them normally
 - if a domain only has `A` records, the server synthesizes `AAAA` records using the configured prefix
-- if you query `<IPv4>.nat64` as `AAAA`, the server synthesizes a single NAT64 `AAAA` directly from that literal IPv4
+- if you query a literal IPv4 like `<IPv4>` as `AAAA`, the server synthesizes a single NAT64 `AAAA` directly from that IPv4
+- if you query `<IPv4>.nat64` as `AAAA`, the server also synthesizes a single NAT64 `AAAA` directly from that literal IPv4
 - the default DNS64 prefix is the RFC well-known NAT64 prefix:
   - `64:ff9b::/96`
 - on manual interactive startup, if DNS64 is still `off`, the server asks whether you want to enable it

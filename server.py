@@ -421,17 +421,26 @@ def resolve_with_python(query: bytes, dns64_enabled: bool, dns64_prefix: ipaddre
                 answers.append((ttl, ipaddress.IPv4Address(ip).packed))
             return dns_build_response(query, DNS_TYPE_A, answers, DNS_RCODE_NOERROR), qname, f"NOERROR answers={len(answers)}"
         if question["qtype"] == DNS_TYPE_AAAA:
-            if dns64_enabled and qname.lower().endswith(".nat64"):
-                raw_ipv4 = qname[:-6].rstrip(".")
+            if dns64_enabled:
                 try:
-                    synthesized = synthesize_nat64_ipv6(raw_ipv4, dns64_prefix)
+                    synthesized = synthesize_nat64_ipv6(qname, dns64_prefix)
                     return (
                         dns_build_response(query, DNS_TYPE_AAAA, [(ttl, synthesized)], DNS_RCODE_NOERROR),
                         qname,
                         "DNS64 literal answers=1",
                     )
                 except ipaddress.AddressValueError:
-                    pass
+                    if qname.lower().endswith(".nat64"):
+                        raw_ipv4 = qname[:-6].rstrip(".")
+                        try:
+                            synthesized = synthesize_nat64_ipv6(raw_ipv4, dns64_prefix)
+                            return (
+                                dns_build_response(query, DNS_TYPE_AAAA, [(ttl, synthesized)], DNS_RCODE_NOERROR),
+                                qname,
+                                "DNS64 literal answers=1",
+                            )
+                        except ipaddress.AddressValueError:
+                            pass
             infos = []
             try:
                 infos = socket.getaddrinfo(qname, None, socket.AF_INET6, socket.SOCK_STREAM)
