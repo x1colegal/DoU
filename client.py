@@ -26,7 +26,9 @@ SESSION_PREFIX = b"USTPS-SESSION1\0"
 UDP_BUFFER_BYTES = 4 * 1024 * 1024
 SYSTEMD_UNIT_PATH = "/etc/systemd/system/dou-client.service"
 DNSMASQ_CONF_PATH = "/etc/dnsmasq.conf"
-TRANSPORT_IDLE_TIMEOUT = 3.0
+TRANSPORT_KEEPALIVE_INTERVAL = 1.0
+TRANSPORT_DEAD_TIMEOUT = 6.0
+LOCAL_PENDING_TRANSPORT_TIMEOUT = 2.0
 DNS_FLAG_QR = 0x8000
 DNS_FLAG_RD = 0x0100
 DNS_FLAG_RA = 0x0080
@@ -362,7 +364,7 @@ def main() -> None:
     peer = None
     sender = None
     receiver = None
-    pending: dict[int, tuple[tuple, float, bytes]] = {}
+    pending: dict[int, tuple[tuple, float, bytes, bool, float | None]] = {}
     pending_lock = threading.RLock()
     transport_lock = threading.RLock()
     req_counter = 1
@@ -376,6 +378,31 @@ def main() -> None:
             if req_counter == 0:
                 req_counter = 1
             return rid
+
+    def flush_pending_queries() -> None:
+        with transport_lock:
+            current_sender = sender
+        if current_sender is None:
+            return
+        to_mark_sent = []
+        with pending_lock:
+            snapshot = list(pending.items())
+        for request_id, (_, created_at, payload, already_sent, sent_at) in snapshot:
+            if already_sent:
+                continue
+            try:
+                current_sender.queue_payload(encode_frame(TYPE_QUERY, request_id, payload))
+                to_mark_sent.append(request_id)
+                print(f"[DoU-CLIENT] queued pending local dns query id={request_id}")
+            except Exception:
+                break
+        if to_mark_sent:
+            with pending_lock:
+                for request_id in to_mark_sent:
+                    info = pending.get(request_id)
+                    if info is None:
+                        continue
+                    pending[request_id] = (info[0], info[1], info[2], True, time.time())
 
     def close_transport() -> None:
         nonlocal raw_usock, usock, peer, sender, receiver
@@ -525,24 +552,9 @@ def main() -> None:
                 break
             request_id = next_request_id()
             with pending_lock:
-                pending[request_id] = (src, time.time(), payload)
+                pending[request_id] = (src, time.time(), payload, False, None)
             print(f"[DoU-CLIENT] local dns query id={request_id} from={src[0]}:{src[1]} bytes={len(payload)}")
-            try:
-                with transport_lock:
-                    current_sender = sender
-                if current_sender is None:
-                    raise RuntimeError("transport unavailable")
-                current_sender.queue_payload(encode_frame(TYPE_QUERY, request_id, payload))
-            except Exception as exc:
-                with pending_lock:
-                    pending.pop(request_id, None)
-                servfail = build_dns_servfail(payload)
-                if servfail is not None:
-                    try:
-                        local_dns.sendto(servfail, src)
-                    except OSError:
-                        pass
-                print(f"[DoU-CLIENT] failed to queue local dns query id={request_id}: {exc}")
+            flush_pending_queries()
 
     def transport_listener() -> None:
         while running:
@@ -552,7 +564,9 @@ def main() -> None:
                 print(f"[DoU-CLIENT] transport connect failed: {exc}")
                 time.sleep(1.0)
                 continue
+            flush_pending_queries()
             last_rx_ts = time.time()
+            last_ping_ts = 0.0
             while running:
                 with transport_lock:
                     current_sock = usock
@@ -560,11 +574,19 @@ def main() -> None:
                     current_receiver = receiver
                 if current_sock is None or current_sender is None or current_receiver is None:
                     break
+                now = time.time()
+                if (now - last_ping_ts) >= TRANSPORT_KEEPALIVE_INTERVAL:
+                    try:
+                        current_sender.queue_payload(encode_frame(TYPE_PING, 0, b"keepalive"))
+                        last_ping_ts = now
+                    except Exception:
+                        pass
+                flush_pending_queries()
                 try:
                     raw, addr = current_sock.recvfrom(65535)
                 except socket.timeout:
-                    if (time.time() - last_rx_ts) >= TRANSPORT_IDLE_TIMEOUT:
-                        print("[DoU-CLIENT] transport idle timeout, reconnecting")
+                    if (time.time() - last_rx_ts) >= TRANSPORT_DEAD_TIMEOUT:
+                        print("[DoU-CLIENT] transport keepalive timeout, reconnecting")
                         break
                     continue
                 except OSError as exc:
@@ -624,8 +646,14 @@ def main() -> None:
             now = time.time()
             stale = []
             with pending_lock:
-                for request_id, (_, created_at, _) in pending.items():
-                    if (now - created_at) > args.request_timeout:
+                for request_id, (_, created_at, _, sent, sent_at) in pending.items():
+                    if not sent:
+                        if (now - created_at) > LOCAL_PENDING_TRANSPORT_TIMEOUT:
+                            stale.append(request_id)
+                        continue
+                    if sent_at is None:
+                        sent_at = created_at
+                    if (now - sent_at) > args.request_timeout:
                         stale.append(request_id)
                 for request_id in stale:
                     info = pending.pop(request_id, None)
