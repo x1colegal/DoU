@@ -26,6 +26,7 @@ SESSION_PREFIX = b"USTPS-SESSION1\0"
 UDP_BUFFER_BYTES = 4 * 1024 * 1024
 SYSTEMD_UNIT_PATH = "/etc/systemd/system/dou-client.service"
 DNSMASQ_CONF_PATH = "/etc/dnsmasq.conf"
+TRANSPORT_IDLE_TIMEOUT = 3.0
 DNS_FLAG_QR = 0x8000
 DNS_FLAG_RD = 0x0100
 DNS_FLAG_RA = 0x0080
@@ -551,6 +552,7 @@ def main() -> None:
                 print(f"[DoU-CLIENT] transport connect failed: {exc}")
                 time.sleep(1.0)
                 continue
+            last_rx_ts = time.time()
             while running:
                 with transport_lock:
                     current_sock = usock
@@ -561,10 +563,14 @@ def main() -> None:
                 try:
                     raw, addr = current_sock.recvfrom(65535)
                 except socket.timeout:
+                    if (time.time() - last_rx_ts) >= TRANSPORT_IDLE_TIMEOUT:
+                        print("[DoU-CLIENT] transport idle timeout, reconnecting")
+                        break
                     continue
                 except OSError as exc:
                     print(f"[DoU-CLIENT] transport lost: {exc}")
                     break
+                last_rx_ts = time.time()
                 pkt = parse_packet(raw)
                 if pkt is None:
                     continue
