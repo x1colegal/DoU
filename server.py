@@ -363,6 +363,12 @@ def dns_wire_name_from_text(name: str) -> bytes:
     return bytes(out)
 
 
+def synthesize_nat64_ipv6(ipv4_text: str, dns64_prefix: ipaddress.IPv6Network) -> bytes:
+    ipv4_int = int(ipaddress.IPv4Address(ipv4_text))
+    ipv6_int = int(dns64_prefix.network_address) | ipv4_int
+    return ipaddress.IPv6Address(ipv6_int).packed
+
+
 def dns_build_response(query: bytes, qtype: int, answers: list[tuple[int, bytes]], rcode: int = DNS_RCODE_NOERROR) -> bytes | None:
     question = dns_parse_question(query)
     if question is None:
@@ -415,6 +421,17 @@ def resolve_with_python(query: bytes, dns64_enabled: bool, dns64_prefix: ipaddre
                 answers.append((ttl, ipaddress.IPv4Address(ip).packed))
             return dns_build_response(query, DNS_TYPE_A, answers, DNS_RCODE_NOERROR), qname, f"NOERROR answers={len(answers)}"
         if question["qtype"] == DNS_TYPE_AAAA:
+            if dns64_enabled and qname.lower().endswith(".nat64"):
+                raw_ipv4 = qname[:-6].rstrip(".")
+                try:
+                    synthesized = synthesize_nat64_ipv6(raw_ipv4, dns64_prefix)
+                    return (
+                        dns_build_response(query, DNS_TYPE_AAAA, [(ttl, synthesized)], DNS_RCODE_NOERROR),
+                        qname,
+                        "DNS64 literal answers=1",
+                    )
+                except ipaddress.AddressValueError:
+                    pass
             infos = []
             try:
                 infos = socket.getaddrinfo(qname, None, socket.AF_INET6, socket.SOCK_STREAM)
@@ -441,9 +458,7 @@ def resolve_with_python(query: bytes, dns64_enabled: bool, dns64_prefix: ipaddre
                     if ip4 in seen4:
                         continue
                     seen4.add(ip4)
-                    ipv4_int = int(ipaddress.IPv4Address(ip4))
-                    ipv6_int = int(dns64_prefix.network_address) | ipv4_int
-                    synth.append((ttl, ipaddress.IPv6Address(ipv6_int).packed))
+                    synth.append((ttl, synthesize_nat64_ipv6(ip4, dns64_prefix)))
                 return dns_build_response(query, DNS_TYPE_AAAA, synth, DNS_RCODE_NOERROR), qname, f"DNS64 answers={len(synth)}"
             return dns_build_response(query, DNS_TYPE_AAAA, [], DNS_RCODE_NOERROR), qname, "NOERROR answers=0"
         if question["qtype"] == DNS_TYPE_PTR:
