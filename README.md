@@ -4,6 +4,9 @@ DoU means **DNS-over-USTPS**.
 
 This project uses the current `USTP-Secure` transport base and tunnels DNS packets over `USTPS`.
 
+## DISCLAMER
+This repository is discontinued. it will not recive any USTPS update, and any inconsistences with The USTPS that will be fixed in ALL projects Will not be fixed here.
+
 ## Architecture
 
 - `server.py`
